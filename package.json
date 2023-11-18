@@ -7,13 +7,7 @@
   "keywords": [],
   "author": "",
   "license": "MIT",
-  "exports": {
-    ".": {
-      "import": "./dist/esm/jetdb.mjs",
-      "require": "./dist/jetdb.js"
-    },
-    "./*": "./*"
-  },
+  "types": "./dist/jetdb.d.ts",
   "scripts": {
     "build": "npm run build:cjs && npm run build:esm",
     "build:cjs": "tsc --module commonjs --outDir dist",

@@ -49,18 +49,21 @@ async function parseUsedPagesMap(
   reader: BufferReader,
   version: DatabaseConfig,
 ): Promise<number[]> {
+  let skip = 14
+  if (version.version == 3) {
+    skip = 10
+  }
   const usedPagesParser1 = new Parser()
     .endianness('little')
-    .seek(14)
+    .seek(skip)
     .uint16('firstPageApplies')
     .seek(function (this: usedPagesMap) {
-      return this.firstPageApplies - 16
+      return this.firstPageApplies - (skip + 2)
     })
     .uint8('mapType')
     .buffer('bitmap', { readUntil: 'eof' })
 
   const usedPagesMap = usedPagesParser1.parse(buf)
-  // console.log(usedPagesMap)
 
   const usedPages: Array<number> = []
   if (usedPagesMap.mapType == 1) {
@@ -123,23 +126,68 @@ type Tdef = {
   cols: TdefColumn[]
   colNames: TdefColumnName[]
   usedPagesPage: number
+  nextPage: number
 }
 
-function parseTdef(buf: Buffer): Tdef {
-  const tdef = new Parser()
+async function parseTdef(
+  buf: Buffer,
+  version: DatabaseConfig,
+  reader: BufferReader,
+): Promise<Tdef> {
+  const frontParser = new Parser()
     .endianness('little')
     .uint8('pagecode', { assert: 0x02 })
     .seek(1)
-    .uint16('freeSpaceInPage')
-    .uint32('nextPage')
-    .uint32('tdefLen')
-    .seek(4)
-    .uint32('numRows')
-    .uint32('autoNumber')
-    .uint8('autoNumberFlag')
-    .seek(3)
-    .uint32('autoNumberValue')
-    .seek(8)
+
+  if (version.version == 3) {
+    frontParser.string('mark', { assert: 'VC', length: 2 })
+  } else {
+    frontParser.uint16('freeSpaceInPage')
+  }
+  frontParser.uint32('nextPage').uint32('tdefLen')
+
+  // handle nextpage
+  // only supports one nextPage
+  // just add nextpage at the end of current buffer
+  const tdefFront = frontParser.parse(buf)
+  let tdefBuffer = Buffer.alloc(version.pageSize)
+  if (tdefFront.nextPage > 0) {
+    tdefBuffer = Buffer.alloc(version.pageSize * 2)
+    const nextBuffer = await reader.readBuffer(
+      version.pageSize,
+      tdefFront.nextPage,
+    )
+    buf.copy(tdefBuffer)
+    // 8 is page header like tdefFront, probably 8 in jetdb3 and 4
+    nextBuffer.copy(tdefBuffer, version.pageSize, 8)
+  } else {
+    buf.copy(tdefBuffer)
+  }
+
+  // Parse all pages
+  const tdefParser = new Parser()
+    .endianness('little')
+    .uint8('pagecode', { assert: 0x02 })
+    .seek(1)
+
+  if (version.version == 3) {
+    tdefParser.string('mark', { assert: 'VC', length: 2 })
+  } else {
+    tdefParser.uint16('freeSpaceInPage')
+  }
+  tdefParser.uint32('nextPage').uint32('tdefLen')
+
+  if (version.version == 4) {
+    tdefParser.seek(4)
+  }
+
+  tdefParser.uint32('numRows').uint32('autoNumber')
+
+  if (version.version == 4) {
+    tdefParser.uint8('autoNumberFlag').seek(3).uint32('autoNumberValue').seek(8)
+  }
+
+  tdefParser
     .uint8('tableType')
     .uint16('maxCols')
     .uint16('numVarCols')
@@ -159,7 +207,14 @@ function parseTdef(buf: Buffer): Tdef {
       type: new Parser().uint32le('usedPagesPage'),
     })
     .uint32('freePagesCount')
-    .array('indexes', {
+
+  if (version.version == 3) {
+    tdefParser.array('indexes', {
+      type: Parser.start().endianness('little').seek(4).uint32('idxRows'),
+      length: 'numRealIdx',
+    })
+  } else {
+    tdefParser.array('indexes', {
       type: Parser.start()
         .endianness('little')
         .seek(4)
@@ -167,30 +222,56 @@ function parseTdef(buf: Buffer): Tdef {
         .seek(4),
       length: 'numRealIdx',
     })
-    .array('cols', {
+  }
+
+  const columnParser = Parser.start().endianness('little').uint8('type')
+
+  if (version.version == 4) {
+    columnParser.seek(4)
+  }
+
+  columnParser.uint16('number').uint16('offsetV').uint16('num')
+
+  if (version.version == 3) {
+    columnParser.uint16('sortOrder')
+  }
+
+  columnParser
+    .uint16('misc')
+    .uint16('miscExt') // unknown on jet3
+    .uint8('bitmask')
+
+  if (version.version == 4) {
+    columnParser.uint8('miscFlags').seek(4)
+  }
+
+  columnParser.uint16('offsetF').uint16('length')
+
+  tdefParser.array('cols', {
+    type: columnParser,
+    length: 'numCols',
+  })
+
+  if (version.version == 3) {
+    tdefParser.array('colNames', {
       type: Parser.start()
         .endianness('little')
-        .uint8('type')
-        .seek(4)
-        .uint16('number')
-        .uint16('offsetV')
-        .uint16('num')
-        .uint16('misc')
-        .uint16('miscExt')
-        .uint8('bitmask')
-        .uint8('miscFlags')
-        .seek(4)
-        .uint16('offsetF')
-        .uint16('length'),
+        .uint8('length')
+        .string('name', { encoding: 'latin1', length: 'length' }),
       length: 'numCols',
     })
-    .array('colNames', {
+  } else {
+    tdefParser.array('colNames', {
       type: Parser.start()
         .endianness('little')
         .uint16('length')
         .string('name', { encoding: 'utf-16', length: 'length' }),
       length: 'numCols',
     })
+  }
+  // .buffer('rest', { readUntil: 'eof' })
+
+  // index parsing is not enabled for now
   // .array('realIndexes', {
   //   type: Parser.start()
   //     .endianness('little')
@@ -245,7 +326,10 @@ function parseTdef(buf: Buffer): Tdef {
   //   },
   // })
   // console.log(buf)
-  return tdef.parse(buf) as Tdef
+
+  const tdef = tdefParser.parse(tdefBuffer) as Tdef
+  // console.log(buf)
+  return tdef
 }
 
 type DatabaseConfig = {
@@ -282,6 +366,157 @@ type ColumnData = {
   value: number | bigint | string | Date | null
 }
 
+// buffer should be final text buffer
+function parseText(buffer: Buffer, version: DatabaseConfig): string {
+  if (version.version == 3) {
+    // default encoding for jet3 should be cp1252
+    // but it depends on the machine the file was created
+    // latin1 may be close enough
+    return buffer.toString('latin1')
+  } else {
+    // compressed format
+    if (buffer[0] == 0xff && buffer[1] == 0xfe) {
+      const start = 2
+      const slen = buffer.length - 2
+      const decompressed = decompressUnicode(
+        buffer.subarray(start, buffer.length),
+        slen,
+        slen * 2,
+      )
+      return decompressed.toString('utf16le')
+    } else {
+      return buffer.toString('utf16le')
+    }
+  }
+}
+
+// decompress_unicode(const char *src, size_t slen, char *dst, size_t dlen) {
+// decompress_unicode(src + 2, slen - 2, tmp, slen * 2);
+// compressed format
+// allocate double the original
+// add null to every other byte
+// unless there exists null byte then
+// adding null bytes is switched off until next null byte comes
+function decompressUnicode(src: Buffer, slen: number, dlen: number) {
+  let compress = 1
+  let pos = 0
+  let tlen = 0
+  const dst = Buffer.alloc(slen * 2)
+  while (slen > 0 && tlen < dlen) {
+    if (src[pos] == 0x00) {
+      compress = compress ? 0 : 1
+      pos += 1
+      slen -= 1
+    } else if (compress) {
+      dst[tlen] = src[pos]
+      tlen += 1
+      dst[tlen] = 0x00
+      tlen += 1
+      slen -= 1
+      pos += 1
+    } else if (slen >= 2) {
+      dst[tlen] = src[pos]
+      tlen += 1
+      pos += 1
+      dst[tlen] = src[pos]
+      tlen += 1
+      pos += 1
+      slen -= 2
+    } else {
+      break
+    }
+  }
+  // console.log(src)
+  // console.log(tlen)
+  // console.log(dst.subarray(0, tlen))
+  return dst.subarray(0, tlen)
+
+  // unsigned int compress=1;
+  // size_t tlen = 0;
+  // while (slen > 0 && tlen < dlen) {
+  //   if (*src == 0) {
+  //     compress = (compress) ? 0 : 1;
+  //     src++;
+  //     slen--;
+  //   } else if (compress) {
+  //     dst[tlen++] = *src++;
+  //     dst[tlen++] = 0;
+  //     slen--;
+  //   } else if (slen >= 2){
+  //     dst[tlen++] = *src++;
+  //     dst[tlen++] = *src++;
+  //     slen-=2;
+  //   } else { // Odd # of bytes
+  //     break;
+  //   }
+  // }
+  // return tlen;
+}
+
+function parseColumn(
+  buffer: Buffer,
+  column: TdefColumn,
+  start: number,
+  length: number,
+  version: DatabaseConfig,
+): number | bigint | string | Date | null {
+  switch (column.type) {
+    case 1: // bool
+      return buffer.readUint8(start) ? 1 : 0
+    case 2: // byte
+      return buffer.readUint8(start)
+    case 3: // int
+      return buffer.readUint16LE(start)
+    case 4: // longint
+      return buffer.readUint32LE(start)
+    case 7: // double
+      return buffer.readDoubleLE(start)
+    case 8: // datetime
+      // parseDate(buffer.readDoubleLE(start))
+      return buffer.readBigUInt64LE(start)
+    case 10: // text
+      return parseText(buffer.subarray(start, start + length), version)
+    case 12: {
+      // memo, long text
+      let memoLen = buffer.readUint16LE(start)
+      memoLen << 8
+      memoLen += buffer.readUint8(start + 2)
+      const memoMask = buffer.readUint8(start + 3)
+      // const memoRow = buffer.readUint8(start + 4)
+      let memoPage = buffer.readUint16LE(start + 5)
+      memoPage << 8
+      memoPage += buffer.readUint8(start + 7)
+
+      // console.log(memoLen, memoRow, memoMask, memoPage)
+      // inline text
+      if (memoMask == 0x80) {
+        // 12 bytes from start
+        return parseText(
+          buffer.subarray(start + 12, start + 12 + memoLen),
+          version,
+        )
+      } else if (memoMask == 0x40) {
+        // column is in page memoPage (LVAL)
+        return '[unknown type]'
+        // open page buffer
+        // parse offset map
+        // take offset at memoRow
+        // memo size is start offset -> end offset
+        // parseText(buffer.subarray(start, end))
+      }
+
+      return '[unknown type]'
+    }
+    default:
+      // console.log(
+      //   'UNKNOWN',
+      //   column.type,
+      //   buffer.subarray(start, start + length),
+      // )
+      return '[unknown type]'
+  }
+}
+
 async function readRows(
   usedPagesMap: number[],
   reader: BufferReader,
@@ -298,12 +533,13 @@ async function readRows(
       .seek(1)
       .uint16('freeSpaceInPage')
       .uint32('tdefPage')
-      .seek(4)
-      .uint16('numRows')
-      .array('offsets', {
-        type: Parser.start().endianness('little').uint16(''),
-        length: 'numRows',
-      })
+    if (version.version == 4) {
+      parser.seek(4)
+    }
+    parser.uint16('numRows').array('offsets', {
+      type: Parser.start().endianness('little').uint16(''),
+      length: 'numRows',
+    })
     const parsed = parser.parse(buffer) as DataPage
     // as Testi
     // console.log(parsed)
@@ -333,24 +569,43 @@ async function readRows(
         // if (offset.delFlag) return
         // const p2 = new Parser().seek(offset.offset).uint16le('')
         // const columnsInRow = p2.parse(xx)
-        const columnsInRow = buffer.readUInt16LE(offset.offset)
+        let columnsInRow = 0
+        if (version.version == 3) {
+          columnsInRow = buffer.readUInt8(offset.offset)
+        } else {
+          columnsInRow = buffer.readUInt16LE(offset.offset)
+        }
         const columnData: ColumnData[] = []
 
-        const varLenSize = 2
+        let varLenSize = 2
+        if (version.version == 3) {
+          varLenSize = 1
+        }
+
         const nullMaskSize = Math.floor((columnsInRow + 7) / 8)
 
-        const varLen = buffer.readUInt16LE(
-          offset.next - varLenSize - nullMaskSize,
-        )
+        let varLen = 0
+        if (version.version == 3) {
+          varLen = buffer.readUInt8(offset.next - varLenSize - nullMaskSize)
+        } else {
+          varLen = buffer.readUInt16LE(offset.next - varLenSize - nullMaskSize)
+        }
+
         // const p3 = new Parser()
         //   .seek(offset.next - varLenSize - nullMaskSize)
         //   .uint16le('')
         // const varLen = p3.parse(xx)
 
+        // console.log(varLen, columnsInRow)
+
+        let varLenType = 'uint16le'
+        if (version.version == 3) {
+          varLenType = 'uint8'
+        }
         const p4 = new Parser()
           .seek(offset.next - varLenSize - nullMaskSize - varLen * varLenSize)
           .array('', {
-            type: 'uint16le',
+            type: varLenType,
             length: varLen,
           })
         const varOffsets = p4.parse(buffer).reverse()
@@ -358,15 +613,27 @@ async function readRows(
 
         // end of varoffsets position to make last column.offsetV + 1 work
         // should be read by previous parser and not here?
-        varOffsets.push(
-          buffer.readUInt16LE(
-            offset.next -
-              varLenSize -
-              nullMaskSize -
-              varLenSize * varLen -
-              varLenSize,
-          ),
-        )
+        if (version.version == 3) {
+          varOffsets.push(
+            buffer.readUInt8(
+              offset.next -
+                varLenSize -
+                nullMaskSize -
+                varLenSize * varLen -
+                varLenSize,
+            ),
+          )
+        } else {
+          varOffsets.push(
+            buffer.readUInt16LE(
+              offset.next -
+                varLenSize -
+                nullMaskSize -
+                varLenSize * varLen -
+                varLenSize,
+            ),
+          )
+        }
 
         const p8 = new Parser().seek(offset.next - nullMaskSize).array('', {
           type: Parser.start()
@@ -407,123 +674,16 @@ async function readRows(
             }
           }
 
-          // decompress_unicode(const char *src, size_t slen, char *dst, size_t dlen) {
-          // decompress_unicode(src + 2, slen - 2, tmp, slen * 2);
-
-          // compressed format
-          // allocate double the original
-          // add null to every other byte
-          // unless there exists null byte then
-          // adding null bytes is switched off until next null byte comes
-          function decompressUnicode(src: Buffer, slen: number, dlen: number) {
-            let compress = 1
-            let pos = 0
-            let tlen = 0
-            const dst = Buffer.alloc(slen * 2)
-            while (slen > 0 && tlen < dlen) {
-              if (src[pos] == 0x00) {
-                compress = compress ? 0 : 1
-                pos += 1
-                slen -= 1
-              } else if (compress) {
-                dst[tlen] = src[pos]
-                tlen += 1
-                dst[tlen] = 0x00
-                tlen += 1
-                slen -= 1
-                pos += 1
-              } else if (slen >= 2) {
-                dst[tlen] = src[pos]
-                tlen += 1
-                pos += 1
-                dst[tlen] = src[pos]
-                tlen += 1
-                pos += 1
-                slen -= 2
-              } else {
-                break
-              }
-            }
-            // console.log(src)
-            // console.log(tlen)
-            // console.log(dst.subarray(0, tlen))
-            return dst.subarray(0, tlen)
-
-            // unsigned int compress=1;
-            // size_t tlen = 0;
-            // while (slen > 0 && tlen < dlen) {
-            //   if (*src == 0) {
-            //     compress = (compress) ? 0 : 1;
-            //     src++;
-            //     slen--;
-            //   } else if (compress) {
-            //     dst[tlen++] = *src++;
-            //     dst[tlen++] = 0;
-            //     slen--;
-            //   } else if (slen >= 2){
-            //     dst[tlen++] = *src++;
-            //     dst[tlen++] = *src++;
-            //     slen-=2;
-            //   } else { // Odd # of bytes
-            //     break;
-            //   }
-            // }
-            // return tlen;
-          }
-
           if (length > 0) {
-            let columnValue = null
-            switch (column.type) {
-              case 1: // bool
-                columnValue = buffer.readUint8(start) ? 1 : 0
-                break
-              case 2: // byte
-                columnValue = buffer.readUint8(start)
-                break
-              case 3: // int
-                columnValue = buffer.readUint16LE(start)
-                break
-              case 4: // longint
-                columnValue = buffer.readUint32LE(start)
-                break
-              case 7: // double
-                columnValue = buffer.readDoubleLE(start)
-                break
-              case 8: // datetime
-                columnValue = buffer.readBigUInt64LE(start)
-                break
-              case 10: // text
-                // compressed format
-                if (buffer[start] == 0xff && buffer[start + 1] == 0xfe) {
-                  start = start + 2
-                  const slen = start + length - start - 2
-                  const decompressed = decompressUnicode(
-                    buffer.subarray(start, start + length - 2),
-                    slen,
-                    slen * 2,
-                  )
-                  columnValue = decompressed.toString('utf16le')
-                  // console.log(columnValue)
-                } else {
-                  columnValue = buffer.toString(
-                    'utf16le',
-                    start,
-                    start + length,
-                  )
-                  // console.log('COLVAL')
-                  // console.log(columnValue)
-                }
-                // columnValue = new Parser()
-                //   .endianness('little')
-                //   .seek(start)
-                //   .string('', { encoding: 'utf-16', length: length })
-                //   .parse(xx)
-                break
-              default:
-                columnValue = '[unknown type]'
-            }
+            const columnValue = parseColumn(
+              buffer,
+              column,
+              start,
+              length,
+              version,
+            )
             columnData.push({
-              rawValue: Buffer.from([]),
+              rawValue: buffer.subarray(start, start + length),
               position: column.number,
               name: schema.colNames[idx].name,
               type: column.type,
@@ -532,7 +692,7 @@ async function readRows(
             })
           } else {
             columnData.push({
-              rawValue: Buffer.from([]),
+              rawValue: buffer.subarray(start, start + length),
               position: column.number,
               name: schema.colNames[idx].name,
               type: column.type,
@@ -556,6 +716,10 @@ class BufferReader {
     const reader = new BufferReader()
     reader.fh = await fs.open(filename, 'r')
     return reader
+  }
+
+  public async close() {
+    await this.fh.close()
   }
 
   async readBuffer(size: number, position: number): Promise<Buffer> {
@@ -585,11 +749,14 @@ export class JetDb {
     return jetdb
   }
 
+  public async close() {
+    await this.reader.close()
+  }
+
   private databaseVersion(buf: Buffer): DatabaseConfig {
     switch (buf.readInt8(0x14)) {
       case 0x00: {
-        throw new Error('JETDB3 not supported')
-        // return { pageSize: 2048, version: 3 } as DatabaseConfig
+        return { pageSize: 2048, version: 3 } as DatabaseConfig
       }
       case 0x01: {
         return { pageSize: 4096, version: 4 } as DatabaseConfig
@@ -617,7 +784,11 @@ export class JetDb {
     const version = this.databaseVersion(await this.reader.readBuffer(2048, 0))
     this.version = version
 
-    const schema = parseTdef(await this.reader.readBuffer(version.pageSize, 2))
+    const schema = (await parseTdef(
+      await this.reader.readBuffer(version.pageSize, 2),
+      this.version,
+      this.reader,
+    )) as Tdef
 
     const usedPagesMap = await parseUsedPagesMap(
       await this.reader.readBuffer(version.pageSize, schema.usedPagesPage),
@@ -630,9 +801,12 @@ export class JetDb {
     for (const p of this.userTables) {
       const tableId = p.columns.find((p: ColumnData) => p.name == 'Id')?.value
       if (typeof tableId == 'number') {
-        this.schema.push(
-          parseTdef(await this.reader.readBuffer(version.pageSize, tableId)),
-        )
+        const tdef = (await parseTdef(
+          await this.reader.readBuffer(version.pageSize, tableId),
+          this.version,
+          this.reader,
+        )) as Tdef
+        this.schema.push(tdef)
       }
     }
   }

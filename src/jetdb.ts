@@ -1,5 +1,6 @@
 import { Parser } from 'binary-parser'
-import { promises as fs } from 'fs'
+import * as fs from 'fs'
+import { Transform, Stream } from 'stream'
 
 type BitArray = {
   a: 0 | 1
@@ -45,7 +46,6 @@ type usedPagesMap = {
 
 async function parseUsedPagesMap(
   buf: Buffer,
-  // fh: fsPromise.FileHandle,
   reader: BufferReader,
   version: DatabaseConfig,
 ): Promise<number[]> {
@@ -345,7 +345,7 @@ type DataPage = {
   offsets: number[]
 }
 
-type Row = {
+export type Row = {
   number: number
   columns: ColumnData[]
 }
@@ -357,7 +357,7 @@ type RowOffset = {
   next: number
 }
 
-type ColumnData = {
+export type ColumnData = {
   position: number
   rawValue: Buffer
   type: number
@@ -517,6 +517,193 @@ function parseColumn(
   }
 }
 
+function readRowsForPage(
+  buffer: Buffer,
+  schema: Tdef,
+  version: DatabaseConfig,
+): Row[] {
+  const rowData: Row[] = []
+
+  const parser = new Parser()
+    .endianness('little')
+    .uint8('pagecode', { assert: 0x01 })
+    .seek(1)
+    .uint16('freeSpaceInPage')
+    .uint32('tdefPage')
+  if (version.version == 4) {
+    parser.seek(4)
+  }
+  parser.uint16('numRows').array('offsets', {
+    type: Parser.start().endianness('little').uint16(''),
+    length: 'numRows',
+  })
+  const parsed = parser.parse(buffer) as DataPage
+  // as Testi
+  // console.log(parsed)
+  // const offsets: Array<any> = []
+  const offsets = parsed.offsets.map((os: number, idx: number) => {
+    // console.log(offset.offsetRow)
+    let next = version.pageSize
+    if (idx > 0) next = parsed.offsets[idx - 1] & 0x1fff
+    // const lookupFlag = (offset.offsetRow >> 8) & 0xff
+    const lookupFlag = os & (0x8000 >>> 0)
+    const delFlag = (os & (0x4000 >>> 0)) != 0
+    // const delFlag = (offset.offsetRow >> 8) & 0x80
+    const offset = (os & 0x1fff) >>> 0
+    // console.log(os, offset, os.toString(2), offset.toString(2))
+    // console.log(lookupFlag, delFlag, offset, next)
+    return { lookupFlag, delFlag, offset, next } as RowOffset
+  })
+  // console.log(offsets)
+
+  offsets
+    .filter(p => !p.delFlag) // filter deleted rows
+    .forEach((offset: RowOffset, idx: number) => {
+      // fixed length columns
+      // var_columns
+      // eod
+      // var_table
+      // if (offset.delFlag) return
+      // const p2 = new Parser().seek(offset.offset).uint16le('')
+      // const columnsInRow = p2.parse(xx)
+      let columnsInRow = 0
+      if (version.version == 3) {
+        columnsInRow = buffer.readUInt8(offset.offset)
+      } else {
+        columnsInRow = buffer.readUInt16LE(offset.offset)
+      }
+      const columnData: ColumnData[] = []
+
+      let varLenSize = 2
+      if (version.version == 3) {
+        varLenSize = 1
+      }
+
+      const nullMaskSize = Math.floor((columnsInRow + 7) / 8)
+
+      let varLen = 0
+      if (version.version == 3) {
+        varLen = buffer.readUInt8(offset.next - varLenSize - nullMaskSize)
+      } else {
+        varLen = buffer.readUInt16LE(offset.next - varLenSize - nullMaskSize)
+      }
+
+      // const p3 = new Parser()
+      //   .seek(offset.next - varLenSize - nullMaskSize)
+      //   .uint16le('')
+      // const varLen = p3.parse(xx)
+
+      // console.log(varLen, columnsInRow)
+
+      let varLenType = 'uint16le'
+      if (version.version == 3) {
+        varLenType = 'uint8'
+      }
+      const p4 = new Parser()
+        .seek(offset.next - varLenSize - nullMaskSize - varLen * varLenSize)
+        .array('', {
+          type: varLenType,
+          length: varLen,
+        })
+      const varOffsets = p4.parse(buffer).reverse()
+      // console.log(varOffsets)
+
+      // end of varoffsets position to make last column.offsetV + 1 work
+      // should be read by previous parser and not here?
+      if (version.version == 3) {
+        varOffsets.push(
+          buffer.readUInt8(
+            offset.next -
+              varLenSize -
+              nullMaskSize -
+              varLenSize * varLen -
+              varLenSize,
+          ),
+        )
+      } else {
+        varOffsets.push(
+          buffer.readUInt16LE(
+            offset.next -
+              varLenSize -
+              nullMaskSize -
+              varLenSize * varLen -
+              varLenSize,
+          ),
+        )
+      }
+
+      const p8 = new Parser().seek(offset.next - nullMaskSize).array('', {
+        type: Parser.start()
+          .endianness('little')
+          .bit1('a')
+          .bit1('b')
+          .bit1('c')
+          .bit1('d')
+          .bit1('e')
+          .bit1('f')
+          .bit1('g')
+          .bit1('h'),
+        length: nullMaskSize,
+      })
+      const nullMask = p8
+        .parse(buffer)
+        .flatMap((p: BitArray) => Object.values(p))
+
+      schema.cols.forEach((column: TdefColumn, idx: number) => {
+        // fixed
+        // if ((column.bitmask & (0x02 >>> 0)) == 2) {
+        //   console.log('NULLABLE')
+        // }
+        // console.log(schema.colNames[idx].name, column.offsetV, column.type)
+
+        let start = 0
+        let length = 0
+        if ((column.bitmask & 0x01) == 1) {
+          // fixed
+          start = offset.offset + column.offsetF + varLenSize
+          length = column.length
+        } else {
+          // var
+          start = offset.offset + varOffsets[column.offsetV]
+          if (column.offsetV + 1 in varOffsets) {
+            length = varOffsets[column.offsetV + 1] - varOffsets[column.offsetV]
+          }
+        }
+
+        if (length > 0) {
+          const columnValue = parseColumn(
+            buffer,
+            column,
+            start,
+            length,
+            version,
+          )
+          columnData.push({
+            rawValue: buffer.subarray(start, start + length),
+            position: column.number,
+            name: schema.colNames[idx].name,
+            type: column.type,
+            value: columnValue,
+            isNull: nullMask[column.number] == 0,
+          })
+        } else {
+          columnData.push({
+            rawValue: buffer.subarray(start, start + length),
+            position: column.number,
+            name: schema.colNames[idx].name,
+            type: column.type,
+            value: nullMask[column.number] == 0 ? null : '',
+            isNull: nullMask[column.number] == 0,
+          })
+        }
+      })
+
+      rowData.push({ columns: columnData, number: idx } as Row)
+    })
+
+  return rowData
+}
+
 async function readRows(
   usedPagesMap: number[],
   reader: BufferReader,
@@ -524,197 +711,22 @@ async function readRows(
   schema: Tdef,
 ): Promise<Row[]> {
   const rowData: Row[] = []
-
   for (const pageNumber of usedPagesMap) {
     const buffer = await reader.readBuffer(version.pageSize, pageNumber)
-    const parser = new Parser()
-      .endianness('little')
-      .uint8('pagecode', { assert: 0x01 })
-      .seek(1)
-      .uint16('freeSpaceInPage')
-      .uint32('tdefPage')
-    if (version.version == 4) {
-      parser.seek(4)
-    }
-    parser.uint16('numRows').array('offsets', {
-      type: Parser.start().endianness('little').uint16(''),
-      length: 'numRows',
-    })
-    const parsed = parser.parse(buffer) as DataPage
-    // as Testi
-    // console.log(parsed)
-    // const offsets: Array<any> = []
-    const offsets = parsed.offsets.map((os: number, idx: number) => {
-      // console.log(offset.offsetRow)
-      let next = version.pageSize
-      if (idx > 0) next = parsed.offsets[idx - 1] & 0x1fff
-      // const lookupFlag = (offset.offsetRow >> 8) & 0xff
-      const lookupFlag = os & (0x8000 >>> 0)
-      const delFlag = (os & (0x4000 >>> 0)) != 0
-      // const delFlag = (offset.offsetRow >> 8) & 0x80
-      const offset = (os & 0x1fff) >>> 0
-      // console.log(os, offset, os.toString(2), offset.toString(2))
-      // console.log(lookupFlag, delFlag, offset, next)
-      return { lookupFlag, delFlag, offset, next } as RowOffset
-    })
-    // console.log(offsets)
-
-    offsets
-      .filter(p => !p.delFlag) // filter deleted rows
-      .forEach((offset: RowOffset, idx: number) => {
-        // fixed length columns
-        // var_columns
-        // eod
-        // var_table
-        // if (offset.delFlag) return
-        // const p2 = new Parser().seek(offset.offset).uint16le('')
-        // const columnsInRow = p2.parse(xx)
-        let columnsInRow = 0
-        if (version.version == 3) {
-          columnsInRow = buffer.readUInt8(offset.offset)
-        } else {
-          columnsInRow = buffer.readUInt16LE(offset.offset)
-        }
-        const columnData: ColumnData[] = []
-
-        let varLenSize = 2
-        if (version.version == 3) {
-          varLenSize = 1
-        }
-
-        const nullMaskSize = Math.floor((columnsInRow + 7) / 8)
-
-        let varLen = 0
-        if (version.version == 3) {
-          varLen = buffer.readUInt8(offset.next - varLenSize - nullMaskSize)
-        } else {
-          varLen = buffer.readUInt16LE(offset.next - varLenSize - nullMaskSize)
-        }
-
-        // const p3 = new Parser()
-        //   .seek(offset.next - varLenSize - nullMaskSize)
-        //   .uint16le('')
-        // const varLen = p3.parse(xx)
-
-        // console.log(varLen, columnsInRow)
-
-        let varLenType = 'uint16le'
-        if (version.version == 3) {
-          varLenType = 'uint8'
-        }
-        const p4 = new Parser()
-          .seek(offset.next - varLenSize - nullMaskSize - varLen * varLenSize)
-          .array('', {
-            type: varLenType,
-            length: varLen,
-          })
-        const varOffsets = p4.parse(buffer).reverse()
-        // console.log(varOffsets)
-
-        // end of varoffsets position to make last column.offsetV + 1 work
-        // should be read by previous parser and not here?
-        if (version.version == 3) {
-          varOffsets.push(
-            buffer.readUInt8(
-              offset.next -
-                varLenSize -
-                nullMaskSize -
-                varLenSize * varLen -
-                varLenSize,
-            ),
-          )
-        } else {
-          varOffsets.push(
-            buffer.readUInt16LE(
-              offset.next -
-                varLenSize -
-                nullMaskSize -
-                varLenSize * varLen -
-                varLenSize,
-            ),
-          )
-        }
-
-        const p8 = new Parser().seek(offset.next - nullMaskSize).array('', {
-          type: Parser.start()
-            .endianness('little')
-            .bit1('a')
-            .bit1('b')
-            .bit1('c')
-            .bit1('d')
-            .bit1('e')
-            .bit1('f')
-            .bit1('g')
-            .bit1('h'),
-          length: nullMaskSize,
-        })
-        const nullMask = p8
-          .parse(buffer)
-          .flatMap((p: BitArray) => Object.values(p))
-
-        schema.cols.forEach((column: TdefColumn, idx: number) => {
-          // fixed
-          // if ((column.bitmask & (0x02 >>> 0)) == 2) {
-          //   console.log('NULLABLE')
-          // }
-          // console.log(schema.colNames[idx].name, column.offsetV, column.type)
-
-          let start = 0
-          let length = 0
-          if ((column.bitmask & 0x01) == 1) {
-            // fixed
-            start = offset.offset + column.offsetF + varLenSize
-            length = column.length
-          } else {
-            // var
-            start = offset.offset + varOffsets[column.offsetV]
-            if (column.offsetV + 1 in varOffsets) {
-              length =
-                varOffsets[column.offsetV + 1] - varOffsets[column.offsetV]
-            }
-          }
-
-          if (length > 0) {
-            const columnValue = parseColumn(
-              buffer,
-              column,
-              start,
-              length,
-              version,
-            )
-            columnData.push({
-              rawValue: buffer.subarray(start, start + length),
-              position: column.number,
-              name: schema.colNames[idx].name,
-              type: column.type,
-              value: columnValue,
-              isNull: nullMask[column.number] == 0,
-            })
-          } else {
-            columnData.push({
-              rawValue: buffer.subarray(start, start + length),
-              position: column.number,
-              name: schema.colNames[idx].name,
-              type: column.type,
-              value: nullMask[column.number] == 0 ? null : '',
-              isNull: nullMask[column.number] == 0,
-            })
-          }
-        })
-        rowData.push({ columns: columnData, number: idx } as Row)
-      })
+    const rows = readRowsForPage(buffer, schema, version)
+    rowData.push(...rows)
   }
   return rowData
 }
 
 class BufferReader {
-  private fh!: fs.FileHandle
+  private fh!: fs.promises.FileHandle
 
   constructor() {}
 
   public static async create(filename: string): Promise<BufferReader> {
     const reader = new BufferReader()
-    reader.fh = await fs.open(filename, 'r')
+    reader.fh = await fs.promises.open(filename, 'r')
     return reader
   }
 
@@ -855,5 +867,73 @@ export class JetDb {
     )
 
     return rows
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  private pickPages = (pages: number[], _pageSize: number) => {
+    let p = 0
+    return new Transform({
+      transform(chunk, _encoding, cb) {
+        try {
+          // version 1:
+          // highwatermark is default
+          // so we read larger chunks at a time and have process them
+          // const pagesOnChunk = pages.filter((pn: number) => {
+          //   return pn >= p && pn < p + chunk.length / pageSize
+          // })
+          // // console.log(pagesOnChunk)
+          // for (const pn of pagesOnChunk) {
+          //   // console.log((pn - p) * pageSize, (pn - p) * pageSize + pageSize)
+          //   this.push(chunk.subarray((pn - p) * pageSize, (pn - p) * pageSize + pageSize))
+          //   // chunk.subarray()
+          // }
+          // p += chunk.length / pageSize
+          // version 2:
+          // highwatermark is pageSize and chunks come as one page at a time
+          if (pages.includes(p)) {
+            this.push(chunk)
+          }
+          p += 1
+          cb()
+        } catch (error) {
+          cb(error as Error)
+        }
+      },
+    })
+  }
+
+  private transformPages = (schema: Tdef, version: DatabaseConfig) => {
+    return new Transform({
+      readableObjectMode: true,
+      transform(buffer, _encoding, cb) {
+        const rows = readRowsForPage(buffer, schema, version)
+        this.push(rows)
+        cb()
+      },
+    })
+  }
+
+  public async streamRows(table: string): Promise<Stream> {
+    const tableIndex = this.userTables.findIndex((p: Row) => {
+      const val = p.columns.find((p: ColumnData) => p.name == 'Name')?.value
+      return val == table
+    })
+
+    const usedPagesMap = await parseUsedPagesMap(
+      await this.reader.readBuffer(
+        this.version.pageSize,
+        this.schema[tableIndex].usedPagesPage,
+      ),
+      this.reader,
+      this.version,
+    )
+
+    const fileStream = fs.createReadStream(this.filename, {
+      highWaterMark: this.version.pageSize,
+    })
+
+    return fileStream
+      .pipe(this.pickPages(usedPagesMap, this.version.pageSize))
+      .pipe(this.transformPages(this.schema[tableIndex], this.version))
   }
 }

@@ -23,7 +23,7 @@ type usedPagesMap = {
 }
 
 type TdefColumn = {
-  type: number
+  type: ColumnType
   number: number
   offsetF: number
   offsetV: number
@@ -69,13 +69,33 @@ type RowOffset = {
   next: number
 }
 
+export enum ColumnType {
+  BOOL = 0x01 /* Boolean         ( 1 bit ) */,
+  BYTE = 0x02 /* Byte            ( 8 bits) */,
+  INT = 0x03 /* Integer         (16 bits) */,
+  LONGINT = 0x04 /* Long Integer    (32 bits) */,
+  MONEY = 0x05 /* Currency        (64 bits) */,
+  FLOAT = 0x06 /* Single          (32 bits) */,
+  DOUBLE = 0x07 /* Double          (64 bits) */,
+  DATETIME = 0x08 /* Date/Time       (64 bits) */,
+  BINARY = 0x09 /* Binary        (255 bytes) */,
+  TEXT = 0x0a /* Text          (255 bytes) */,
+  OLE = 0x0b /* OLE = Long binary */,
+  MEMO = 0x0c /* Memo = Long text*/,
+  UNKNOWN_0D = 0x0d,
+  UNKNOWN_0E = 0x0e,
+  REPID = 0x0f /* GUID */,
+  NUMERIC = 0x10 /* Scaled decimal  (17 bytes) */,
+}
+
+export type ColumnValue = number | bigint | string | Date | null
 export type ColumnData = {
   position: number
   rawValue: Buffer
-  type: number
+  type: ColumnType
   name: string
   isNull: boolean
-  value: number | bigint | string | Date | null
+  value: ColumnValue
 }
 
 class BufferReader implements Disposable {
@@ -742,26 +762,19 @@ export class JetDb {
             }
           }
 
+          let columnValue: ColumnValue =
+            nullMask[column.number] == 0 ? null : ''
           if (length > 0) {
-            const columnValue = this.parseColumn(buffer, column, start, length)
-            columnData.push({
-              rawValue: buffer.subarray(start, start + length),
-              position: column.number,
-              name: schema.colNames[idx].name,
-              type: column.type,
-              value: columnValue,
-              isNull: nullMask[column.number] == 0,
-            })
-          } else {
-            columnData.push({
-              rawValue: buffer.subarray(start, start + length),
-              position: column.number,
-              name: schema.colNames[idx].name,
-              type: column.type,
-              value: nullMask[column.number] == 0 ? null : '',
-              isNull: nullMask[column.number] == 0,
-            })
+            columnValue = this.parseColumn(buffer, column, start, length)
           }
+          columnData.push({
+            rawValue: buffer.subarray(start, start + length),
+            position: column.number,
+            name: schema.colNames[idx].name,
+            type: column.type,
+            value: columnValue,
+            isNull: nullMask[column.number] == 0,
+          })
         })
 
         rowData.push({ columns: columnData, number: idx } as Row)
@@ -824,6 +837,16 @@ export class JetDb {
     })
     return this.schema[tableIndex].colNames.map((p: TdefColumnName) => {
       return p.name
+    })
+  }
+
+  public columnsWithType(table: string): [string, ColumnType][] {
+    const tableIndex = this.userTables.findIndex((p: Row) => {
+      const val = p.columns.find((p: ColumnData) => p.name == 'Name')?.value
+      return val == table
+    })
+    return this.schema[tableIndex].cols.map((p: TdefColumn, index: number) => {
+      return [this.schema[tableIndex].colNames[index].name, p.type]
     })
   }
 

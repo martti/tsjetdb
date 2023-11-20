@@ -3,7 +3,7 @@ import { JetDb, Row } from '../src/jetdb'
 
 describe('JetDb tests', () => {
   it('should throw unknown database version', () => {
-    const jetdb = new JetDb('tmp')
+    const jetdb = new JetDb('./tests/data/testV2000.mdb')
     expect(() => {
       jetdb['databaseVersion'](
         Buffer.from([
@@ -13,8 +13,8 @@ describe('JetDb tests', () => {
     }).toThrow('Unknown database version 2')
   })
 
-  it('should throw unknown database version for Access 2020 files', async () => {
-    await expect(JetDb.create('./tests/data/testV2010.accdb')).rejects.toThrow(
+  it('should throw unknown database version for Access 2020 files', () => {
+    expect(() => new JetDb('./tests/data/testV2010.accdb')).toThrow(
       'Unknown database version 3',
     )
   })
@@ -22,9 +22,8 @@ describe('JetDb tests', () => {
 
 describe('JetDb 4 tests', () => {
   let jetdb: JetDb
-
-  beforeAll(async () => {
-    jetdb = await JetDb.create('./tests/data/testV2000.mdb')
+  beforeAll(() => {
+    jetdb = new JetDb('./tests/data/testV2000.mdb')
   })
 
   it('should have 4 tables', () => {
@@ -55,12 +54,12 @@ describe('JetDb 4 tests', () => {
     ])
   })
 
-  it('table 1 have 2 rows', async () => {
-    expect((await jetdb.rows('Table1')).length).toEqual(2)
+  it('table 1 have 2 rows', () => {
+    expect(jetdb.rows('Table1').length).toEqual(2)
   })
 
-  it('table 1 columns should have correct values', async () => {
-    const rows = await jetdb.rows('Table1')
+  it('table 1 columns should have correct values', () => {
+    const rows = jetdb.rows('Table1')
     expect(rows[0].columns[0].value).toEqual('abcdefg')
     expect(rows[0].columns[1].value).toEqual('hijklmnop')
     expect(rows[0].columns[2].value).toEqual(2)
@@ -81,17 +80,16 @@ describe('JetDb 4 tests', () => {
     expect(rows[1].columns[8].value).toEqual(0)
   })
 
-  it('table 2 should have no rows', async () => {
-    const rows = await jetdb.rows('Table2')
+  it('table 2 should have no rows', () => {
+    const rows = jetdb.rows('Table2')
     expect(rows.length).toEqual(0)
   })
 })
 
 describe('JetDb 4 tests 2', () => {
   let jetdb: JetDb
-
-  beforeAll(async () => {
-    jetdb = await JetDb.create('./tests/data/test2V2000.mdb')
+  beforeAll(() => {
+    jetdb = new JetDb('./tests/data/test2V2000.mdb')
   })
 
   it('should have 1 table', () => {
@@ -102,12 +100,12 @@ describe('JetDb 4 tests 2', () => {
     expect(jetdb.columns('MSP_PROJECTS').length).toEqual(74)
   })
 
-  it('table 1 have 1 row', async () => {
-    expect((await jetdb.rows('MSP_PROJECTS')).length).toEqual(1)
+  it('table 1 have 1 row', () => {
+    expect(jetdb.rows('MSP_PROJECTS').length).toEqual(1)
   })
 
-  it('table 1 columns should have correct values', async () => {
-    const rows = await jetdb.rows('MSP_PROJECTS')
+  it('table 1 columns should have correct values', () => {
+    const rows = jetdb.rows('MSP_PROJECTS')
     expect(rows[0].columns[0].value).toEqual(1)
     expect(rows[0].columns[1].value).toEqual('Project1')
     expect(rows[0].columns[2].value).toEqual('[unknown type]')
@@ -119,9 +117,8 @@ describe('JetDb 4 tests 2', () => {
 
 describe('JetDb 3 tests', () => {
   let jetdb: JetDb
-
-  beforeAll(async () => {
-    jetdb = await JetDb.create('./tests/data/testV1997.mdb')
+  beforeAll(() => {
+    jetdb = new JetDb('./tests/data/testV1997.mdb')
   })
 
   it('should have 4 tables', () => {
@@ -152,12 +149,12 @@ describe('JetDb 3 tests', () => {
     ])
   })
 
-  it('table 1 have 2 rows', async () => {
-    expect((await jetdb.rows('Table1')).length).toEqual(2)
+  it('table 1 have 2 rows', () => {
+    expect(jetdb.rows('Table1').length).toEqual(2)
   })
 
-  it('table 1 columns should have correct values', async () => {
-    const rows = await jetdb.rows('Table1')
+  it('table 1 columns should have correct values', () => {
+    const rows = jetdb.rows('Table1')
     expect(rows[1].columns[0].value).toEqual('abcdefg')
     expect(rows[1].columns[1].value).toEqual('hijklmnop')
     expect(rows[1].columns[2].value).toEqual(2)
@@ -178,87 +175,80 @@ describe('JetDb 3 tests', () => {
     expect(rows[0].columns[8].value).toEqual(0)
   })
 
-  it('table 2 should have no rows', async () => {
-    const rows = await jetdb.rows('Table2')
+  it('table 2 should have no rows', () => {
+    const rows = jetdb.rows('Table2')
     expect(rows.length).toEqual(0)
   })
 })
 
 describe('JetDb 4 stream tests', () => {
   let jetdb: JetDb
-
-  beforeAll(async () => {
-    jetdb = await JetDb.create('./tests/data/testV2000.mdb')
+  beforeAll(() => {
+    jetdb = new JetDb('./tests/data/testV2000.mdb')
   })
-
   it('table 1 have 2 rows', done => {
-    jetdb.streamRows('Table1').then(rowstream => {
-      let count = 0
-      rowstream
-        .on('data', (rows: []) => {
-          count += rows.length
-        })
-        .on('end', () => {
-          try {
-            expect(count).toEqual(2)
-            done()
-          } catch (error) {
-            done(error as Error)
-          }
-        })
-    })
+    const rowstream = jetdb.streamRows('Table1')
+    let count = 0
+    rowstream
+      .on('data', (rows: []) => {
+        count += rows.length
+      })
+      .on('end', () => {
+        try {
+          expect(count).toEqual(2)
+          done()
+        } catch (error) {
+          done(error as Error)
+        }
+      })
   })
-
   it('table 2 should have no rows', done => {
-    jetdb.streamRows('Table2').then(rowstream => {
-      let count = 0
-      rowstream
-        .on('data', (rows: []) => {
-          count += rows.length
-        })
-        .on('end', () => {
-          try {
-            expect(count).toEqual(0)
-            done()
-          } catch (error) {
-            done(error as Error)
-          }
-        })
-    })
+    const rowstream = jetdb.streamRows('Table2')
+    let count = 0
+    rowstream
+      .on('data', (rows: []) => {
+        count += rows.length
+      })
+      .on('end', () => {
+        try {
+          expect(count).toEqual(0)
+          done()
+        } catch (error) {
+          done(error as Error)
+        }
+      })
   })
-
   it('table 1 columns should have correct values', done => {
-    jetdb.streamRows('Table1').then(rowstream => {
-      const rows: Row[] = []
-      rowstream
-        .on('data', (newRows: Row[]) => {
-          rows.push(...newRows)
-        })
-        .on('end', () => {
-          try {
-            expect(rows[0].columns[0].value).toEqual('abcdefg')
-            expect(rows[0].columns[1].value).toEqual('hijklmnop')
-            expect(rows[0].columns[2].value).toEqual(2)
-            expect(rows[0].columns[3].value).toEqual(222)
-            expect(rows[0].columns[4].value).toEqual(333333333)
-            expect(rows[0].columns[5].value).toEqual(444.555)
-            expect(rows[0].columns[6].value).toEqual(4673231456670056448n) // should be 09/21/74 00:00:00
-            expect(rows[0].columns[7].value).toEqual('[unknown type]') // should be money 3.5000
-            expect(rows[0].columns[8].value).toEqual(1)
-            expect(rows[1].columns[0].value).toEqual('a')
-            expect(rows[1].columns[1].value).toEqual('b')
-            expect(rows[1].columns[2].value).toEqual(0)
-            expect(rows[1].columns[3].value).toEqual(0)
-            expect(rows[1].columns[4].value).toEqual(0)
-            expect(rows[1].columns[5].value).toEqual(0)
-            expect(rows[1].columns[6].value).toEqual(4673956859466481664n) // 12/12/81 00:00:00
-            expect(rows[1].columns[7].value).toEqual('[unknown type]') // money 0.0000
-            expect(rows[1].columns[8].value).toEqual(0)
-            done()
-          } catch (error) {
-            done(error as Error)
-          }
-        })
-    })
+    const rowstream = jetdb.streamRows('Table1')
+    const rows: Row[] = []
+    rowstream
+      .on('data', (newRows: Row[]) => {
+        rows.push(...newRows)
+      })
+      .on('end', () => {
+        try {
+          expect(rows[0].columns[0].value).toEqual('abcdefg')
+          expect(rows[0].columns[1].value).toEqual('hijklmnop')
+          expect(rows[0].columns[2].value).toEqual(2)
+          expect(rows[0].columns[3].value).toEqual(222)
+          expect(rows[0].columns[4].value).toEqual(333333333)
+          expect(rows[0].columns[5].value).toEqual(444.555)
+          expect(rows[0].columns[6].value).toEqual(4673231456670056448n) // should be 09/21/74 00:00:00
+          expect(rows[0].columns[7].value).toEqual('[unknown type]') // should be money 3.5000
+          expect(rows[0].columns[8].value).toEqual(1)
+          expect(rows[1].columns[0].value).toEqual('a')
+          expect(rows[1].columns[1].value).toEqual('b')
+          expect(rows[1].columns[2].value).toEqual(0)
+          expect(rows[1].columns[3].value).toEqual(0)
+          expect(rows[1].columns[4].value).toEqual(0)
+          expect(rows[1].columns[5].value).toEqual(0)
+          expect(rows[1].columns[6].value).toEqual(4673956859466481664n) // 12/12/81 00:00:00
+          expect(rows[1].columns[7].value).toEqual('[unknown type]') // money 0.0000
+          expect(rows[1].columns[8].value).toEqual(0)
+          done()
+        } catch (error) {
+          done(error as Error)
+        }
+      })
   })
 })

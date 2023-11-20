@@ -5,7 +5,7 @@ describe('JetDb tests', () => {
   it('should throw unknown database version', () => {
     const jetdb = new JetDb('./tests/data/testV2000.mdb')
     expect(() => {
-      jetdb['databaseVersion'](
+      jetdb['databaseConfig'](
         Buffer.from([
           0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2,
         ]),

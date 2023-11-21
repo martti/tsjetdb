@@ -341,66 +341,120 @@ export class JetDb {
         length: 'numCols',
       })
     }
-    // .buffer('rest', { readUntil: 'eof' })
 
-    // index parsing is not enabled for now
-    // .array('realIndexes', {
-    //   type: Parser.start()
-    //     .endianness('little')
-    //     .seek(4)
-    //     .array('columns', {
-    //       type: Parser.start()
-    //         .endianness('little')
-    //         .uint16('number')
-    //         .uint8('order'),
-    //       length: 10,
-    //     })
-    //     .uint32('usedPages')
-    //     .uint32('firstDp')
-    //     .uint8('flags')
-    //     .seek(9),
-    //   length: 'numRealIdx',
-    // })
-    // .array('indexInfo', {
-    //   type: Parser.start()
-    //     .endianness('little')
-    //     .seek(4)
-    //     .uint32('number')
-    //     .uint32('number2')
-    //     .uint8('relTblType')
-    //     .uint32('relIdxNum')
-    //     .uint32('relTblPage')
-    //     .uint8('cascadeUps')
-    //     .uint8('cascadeDels')
-    //     .uint8('type')
-    //     .seek(4),
-    //   length: 'numIdx',
-    // })
-    // .array('indexNames', {
-    //   type: Parser.start()
-    //     .endianness('little')
-    //     .uint16('length')
-    //     .string('name', { encoding: 'utf-16', length: 'length' }),
-    //   length: 'numIdx',
-    // })
-    // .array('freePages', {
-    //   type: Parser.start()
-    //     .endianness('little')
-    //     .uint16('colNum')
-    //     .uint32('usedPages')
-    //     .uint32('freePages'),
-    //   readUntil: function (item, buffer) {
-    //     // stop before 0xffff
-    //     // console.log(buffer)
-    //     // if (buffer.length == 2) return true
-    //     if (item.colNum == 0xffff) return true
-    //     return buffer[0] == 255 && buffer[1] == 255
-    //   },
-    // })
+    if (this.config.version == Version.JETDB3) {
+      tdefParser.array('realIndexes', {
+        type: Parser.start()
+          .endianness('little')
+          .array('columns', {
+            type: Parser.start()
+              .endianness('little')
+              .uint16('number')
+              .uint8('order'),
+            length: 10,
+          })
+          .uint32('usedPages')
+          .uint32('firstDp')
+          .uint8('flags'),
+        length: 'numRealIdx',
+      })
+    } else {
+      tdefParser.array('realIndexes', {
+        type: Parser.start()
+          .endianness('little')
+          .seek(4)
+          .array('columns', {
+            type: Parser.start()
+              .endianness('little')
+              .uint16('number')
+              .uint8('order'),
+            length: 10,
+          })
+          .uint32('usedPages')
+          .uint32('firstDp')
+          .uint8('flags')
+          .seek(9),
+        length: 'numRealIdx',
+      })
+    }
+
+    if (this.config.version == Version.JETDB3) {
+      tdefParser
+        .array('indexInfo', {
+          type: Parser.start()
+            .endianness('little')
+            .uint32('number')
+            .uint32('number2')
+            .uint8('relTblType')
+            .uint32('relIdxNum')
+            .uint32('relTblPage')
+            .uint8('cascadeUps')
+            .uint8('cascadeDels')
+            .uint8('type'),
+          length: 'numIdx',
+        })
+        .array('indexNames', {
+          type: Parser.start()
+            .endianness('little')
+            .uint8('length')
+            .string('name', { encoding: 'latin1', length: 'length' }),
+          length: 'numIdx',
+        })
+        .array('freePages', {
+          type: Parser.start()
+            .endianness('little')
+            .uint16('colNum')
+            .uint32('usedPages')
+            .uint32('freePages'),
+          readUntil: function (item, buffer) {
+            // stop before 0xffff
+            // console.log(buffer)
+            // if (buffer.length == 2) return true
+            if (item.colNum == 0xffff) return true
+            return buffer[0] == 255 && buffer[1] == 255
+          },
+        })
+    } else {
+      tdefParser
+        .array('indexInfo', {
+          type: Parser.start()
+            .endianness('little')
+            .seek(8)
+            .uint32('number')
+            .uint32('number2')
+            .uint8('relTblType')
+            .uint32('relIdxNum')
+            .uint32('relTblPage')
+            .uint8('cascadeUps')
+            .uint8('cascadeDels')
+            .uint8('type'),
+          length: 'numIdx',
+        })
+        .array('indexNames', {
+          type: Parser.start()
+            .endianness('little')
+            .uint16('length')
+            .string('name', { encoding: 'utf-16', length: 'length' }),
+          length: 'numIdx',
+        })
+        .array('freePages', {
+          type: Parser.start()
+            .endianness('little')
+            .uint16('colNum')
+            .uint32('usedPages')
+            .uint32('freePages'),
+          readUntil: function (item, buffer) {
+            // stop before 0xffff
+            // console.log(buffer)
+            // if (buffer.length == 2) return true
+            if (item.colNum == 0xffff) return true
+            return buffer[0] == 255 && buffer[1] == 255
+          },
+        })
+    }
     // console.log(buf)
 
     const tdef = tdefParser.parse(tdefBuffer) as Tdef
-    // console.log(buf)
     return tdef
   }
 

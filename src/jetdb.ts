@@ -37,6 +37,7 @@ type TdefColumnName = {
 }
 
 type Tdef = {
+  numRows: number
   pagecode: number
   cols: TdefColumn[]
   colNames: TdefColumnName[]
@@ -629,13 +630,16 @@ export class JetDb {
       case 12: {
         // memo, long text
         let memoLen = buffer.readUint16LE(start)
-        memoLen << 8
+        // memoLen << 8
         memoLen += buffer.readUint8(start + 2)
         const memoMask = buffer.readUint8(start + 3)
-        const memoRow = buffer.readUint8(start + 4)
-        let memoPage = buffer.readUint16LE(start + 5)
-        memoPage << 8
-        memoPage += buffer.readUint8(start + 7)
+        const tmp = buffer.readUint32LE(start + 4)
+        const memoPage = tmp >> 8
+        const memoRow = tmp & 0xff
+        // const memoRow = buffer.readUint8(start + 4)
+        // let memoPage = buffer.readUint16LE(start + 5)
+        // memoPage << 8
+        // memoPage += buffer.readUint8(start + 7)
 
         // console.log(memoLen, memoRow, memoMask, memoPage)
         // inline text
@@ -660,6 +664,9 @@ export class JetDb {
             memoBuffer.subarray(offsets[memoRow].offset, offsets[memoRow].next),
           )
           // return '[unknown type]'
+        } else if (memoMask == 0x00) {
+          // from LVAL page type 2
+          return '[unknown type]'
         }
 
         return '[unknown type]'
@@ -914,6 +921,17 @@ export class JetDb {
     })
     return this.schema[tableIndex].cols.map((p: TdefColumn, index: number) => {
       return [this.schema[tableIndex].colNames[index].name, p.type]
+    })
+  }
+
+  public tablesWithRows(): [string, number][] {
+    return this.userTables.map((p: Row, index: number) => {
+      const val = p.columns.find((p: ColumnData) => p.name == 'Name')?.value
+      if (typeof val == 'string') {
+        return [val, this.schema[index].numRows]
+      } else {
+        throw new Error('Error in table names')
+      }
     })
   }
 

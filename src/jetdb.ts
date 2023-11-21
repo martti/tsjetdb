@@ -632,7 +632,7 @@ export class JetDb {
         memoLen << 8
         memoLen += buffer.readUint8(start + 2)
         const memoMask = buffer.readUint8(start + 3)
-        // const memoRow = buffer.readUint8(start + 4)
+        const memoRow = buffer.readUint8(start + 4)
         let memoPage = buffer.readUint16LE(start + 5)
         memoPage << 8
         memoPage += buffer.readUint8(start + 7)
@@ -646,12 +646,20 @@ export class JetDb {
           )
         } else if (memoMask == 0x40) {
           // column is in page memoPage (LVAL)
-          return '[unknown type]'
           // open page buffer
           // parse offset map
           // take offset at memoRow
           // memo size is start offset -> end offset
           // parseText(buffer.subarray(start, end))
+          const memoBuffer = this.reader.readBuffer(
+            this.config.pageSize,
+            memoPage,
+          )
+          const offsets = this.parseOffsets(memoBuffer)
+          return this.parseText(
+            memoBuffer.subarray(offsets[memoRow].offset, offsets[memoRow].next),
+          )
+          // return '[unknown type]'
         }
 
         return '[unknown type]'
@@ -669,36 +677,7 @@ export class JetDb {
   private readRowsForPage(buffer: Buffer, schema: Tdef): Row[] {
     const rowData: Row[] = []
 
-    const parser = new Parser()
-      .endianness('little')
-      .uint8('pagecode', { assert: 0x01 })
-      .seek(1)
-      .uint16('freeSpaceInPage')
-      .uint32('tdefPage')
-    if (this.config.version == Version.JETDB4) {
-      parser.seek(4)
-    }
-    parser.uint16('numRows').array('offsets', {
-      type: Parser.start().endianness('little').uint16(''),
-      length: 'numRows',
-    })
-    const parsed = parser.parse(buffer) as DataPage
-    // as Testi
-    // console.log(parsed)
-    // const offsets: Array<any> = []
-    const offsets = parsed.offsets.map((os: number, idx: number) => {
-      // console.log(offset.offsetRow)
-      let next = this.config.pageSize
-      if (idx > 0) next = parsed.offsets[idx - 1] & 0x1fff
-      // const lookupFlag = (offset.offsetRow >> 8) & 0xff
-      const lookupFlag = os & (0x8000 >>> 0)
-      const delFlag = (os & (0x4000 >>> 0)) != 0
-      // const delFlag = (offset.offsetRow >> 8) & 0x80
-      const offset = (os & 0x1fff) >>> 0
-      // console.log(os, offset, os.toString(2), offset.toString(2))
-      // console.log(lookupFlag, delFlag, offset, next)
-      return { lookupFlag, delFlag, offset, next } as RowOffset
-    })
+    const offsets = this.parseOffsets(buffer)
     // console.log(offsets)
 
     offsets
@@ -835,6 +814,40 @@ export class JetDb {
       })
 
     return rowData
+  }
+
+  private parseOffsets(buffer: Buffer) {
+    const parser = new Parser()
+      .endianness('little')
+      .uint8('pagecode', { assert: 0x01 })
+      .seek(1)
+      .uint16('freeSpaceInPage')
+      .uint32('tdefPage')
+    if (this.config.version == Version.JETDB4) {
+      parser.seek(4)
+    }
+    parser.uint16('numRows').array('offsets', {
+      type: Parser.start().endianness('little').uint16(''),
+      length: 'numRows',
+    })
+    const parsed = parser.parse(buffer) as DataPage
+    // as Testi
+    // console.log(parsed)
+    // const offsets: Array<any> = []
+    const offsets = parsed.offsets.map((os: number, idx: number) => {
+      // console.log(offset.offsetRow)
+      let next = this.config.pageSize
+      if (idx > 0) next = parsed.offsets[idx - 1] & 0x1fff
+      // const lookupFlag = (offset.offsetRow >> 8) & 0xff
+      const lookupFlag = os & (0x8000 >>> 0)
+      const delFlag = (os & (0x4000 >>> 0)) != 0
+      // const delFlag = (offset.offsetRow >> 8) & 0x80
+      const offset = (os & 0x1fff) >>> 0
+      // console.log(os, offset, os.toString(2), offset.toString(2))
+      // console.log(lookupFlag, delFlag, offset, next)
+      return { lookupFlag, delFlag, offset, next } as RowOffset
+    })
+    return offsets
   }
 
   private readRows(

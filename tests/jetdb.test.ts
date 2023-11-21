@@ -108,10 +108,10 @@ describe('JetDb 4 tests 2', () => {
     const rows = jetdb.rows('MSP_PROJECTS')
     expect(rows[0].columns[0].value).toEqual(1)
     expect(rows[0].columns[1].value).toEqual('Project1')
-    expect(rows[0].columns[2].value).toEqual('[unknown type]')
-    // expect(rows[0].columns[2].value).toEqual(
-    //   'Jon Iles this is a a vawesrasoih aksdkl fas dlkjflkasjd flkjaslkdjflkajlksj dfl lkasjdf lkjaskldfj lkas dlk lkjsjdfkl; aslkdf lkasjkldjf lka skldf lka sdkjfl;kasjd falksjdfljaslkdjf laskjdfk jalskjd flkj aslkdjflkjkjasljdflkjas jf;lkasjd fjkas dasdf asd fasdf asdf asdmhf lksaiyudfoi jasodfj902384jsdf9 aw90se fisajldkfj lkasj dlkfslkd jflksjadf as',
-    // )
+    // expect(rows[0].columns[2].value).toEqual('[unknown type]')
+    expect(rows[0].columns[2].value).toEqual(
+      'Jon Iles this is a a vawesrasoih aksdkl fas dlkjflkasjd flkjaslkdjflkajlksj dfl lkasjdf lkjaskldfj lkas dlk lkjsjdfkl; aslkdf lkasjkldjf lka skldf lka sdkjfl;kasjd falksjdfljaslkdjf laskjdfk jalskjd flkj aslkdjflkjkjasljdflkjas jf;lkasjd fjkas dasdf asd fasdf asdf asdmhf lksaiyudfoi jasodfj902384jsdf9 aw90se fisajldkfj lkasj dlkfslkd jflksjadf as',
+    )
   })
 })
 
